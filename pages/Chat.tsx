@@ -1,16 +1,31 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
-import { ChatSession, Message, StepLog, Agent, AgentCategory } from '../types';
+import { useParams, useNavigate } from 'react-router-dom';
+import { ChatSession, Message, StepLog, Agent, AgentCategory, FileItem } from '../types';
 import { DISHANG_AGENTS } from '../constants';
 import { streamAgentResponse } from '../services/geminiService';
-import { Send, Paperclip, Bot, User, Loader2, MoreHorizontal, Share2, Star, Sparkles, ArrowRight, ChevronRight, BookOpen, BarChart3, FileText, Image as ImageIcon, Box, X, History, Users } from 'lucide-react';
+import { Send, Paperclip, Bot, User, Loader2, MoreHorizontal, Share2, Star, Sparkles, ArrowRight, ChevronRight, BookOpen, BarChart3, FileText, Image as ImageIcon, Box, X, History, Users, FolderOpen, GitMerge, Link, Clock, Check, Power } from 'lucide-react';
 import * as Icons from 'lucide-react';
+import FileViewerModal from '../components/FileViewerModal';
+import SharePopover from '../components/SharePopover';
 
 interface ChatProps {
   sessions: ChatSession[];
   onUpdateSession: (sessionId: string, messages: Message[]) => void;
+  onEndSession: (sessionId: string) => void;
+  onCreateNewSession: (agentId: string) => void;
+  onFavoriteSession: (sessionId: string) => void;
 }
+
+// Mock Files Data
+const MOCK_FILES: FileItem[] = [
+  { id: 'f1', name: '安全生产平台培训.pdf', type: 'pdf', size: '2.4MB', timestamp: '04-24 13:54' },
+  { id: 'f2', name: '安全生产平台产品培训文档.docx', type: 'word', size: '1.8MB', timestamp: '04-24 13:46', isFavorite: true },
+  { id: 'f3', name: '安全生产平台产品目标.xlsx', type: 'excel', size: '56KB', timestamp: '04-24 13:46' },
+  { id: 'f4', name: '产品背景信息收集结果.docx', type: 'word', size: '12KB', timestamp: '04-24 13:46' },
+  { id: 'f5', name: '安全生产平台功能结构图.png', type: 'image', size: '3.2MB', timestamp: '04-24 13:42' },
+  { id: 'f6', name: '2024秋季新品发布会.mp4', type: 'video', size: '128MB', timestamp: '04-23 10:00' },
+];
 
 // Helper to generate mock cases based on category
 const getMockCases = (category: AgentCategory) => {
@@ -42,8 +57,25 @@ const getMockCases = (category: AgentCategory) => {
   }
 };
 
-const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
+// Helper for abortable delay
+const delay = (ms: number, signal?: AbortSignal) => {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort);
+  });
+};
+
+const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession, onEndSession, onCreateNewSession, onFavoriteSession }) => {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [liveSteps, setLiveSteps] = useState<StepLog[]>([]); // Current generation steps
@@ -51,7 +83,12 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
   const [drawerSteps, setDrawerSteps] = useState<StepLog[]>([]); // Steps to show in drawer
   const [activeCollabAgentId, setActiveCollabAgentId] = useState<string | null>(null);
   
+  const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+  const [isSharePopoverOpen, setIsSharePopoverOpen] = useState(false);
+  const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   
   const session = sessions.find(s => s.id === sessionId);
   const agent = DISHANG_AGENTS.find(a => a.id === session?.agentId);
@@ -69,9 +106,17 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
   }, [session?.messages, liveSteps]);
 
   useEffect(() => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+    }
+    setIsStreaming(false);
+    setInput('');
     setLiveSteps([]);
     setDrawerOpen(false);
     setActiveCollabAgentId(null);
+    setIsHistoryDrawerOpen(false);
+    setIsFilesModalOpen(false);
+    setIsSharePopoverOpen(false);
   }, [sessionId]);
 
   if (!session || (!agent && !isCollaboration)) {
@@ -82,19 +127,29 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
   const mockCases = agent ? getMockCases(agent.category) : getMockCases(AgentCategory.MANAGEMENT);
 
   // Generate steps and return them for saving
-  const simulateSteps = async () => {
+  const simulateSteps = async (signal?: AbortSignal, promptText: string = '') => {
     const newSteps: StepLog[] = [
-      { id: '1', title: '意图识别', description: '分析用户需求，匹配业务场景...', status: 'pending', timestamp: '00:00' },
-      { id: '2', title: '知识库检索', description: '正在查询 Dishang RAG 数据库...', status: 'pending', timestamp: '00:01' },
-      { id: '3', title: isCollaboration ? '多智能体协同' : '多模态生成', description: isCollaboration ? '正在调度专家团队进行联合分析...' : '调用 Gemini 2.5 模型生成内容...', status: 'pending', timestamp: '00:02' },
+      { id: '1', title: '用户发送信息', description: `接收到指令：${promptText.length > 15 ? promptText.substring(0, 15) + '...' : promptText}`, status: 'pending', timestamp: '00:00' },
+      { id: '2', title: '文件读取', description: '正在检索安全生产平台相关文档...', status: 'pending', timestamp: '00:01' },
+      { id: '3', title: '虚拟终端', description: '正在运行数据分析脚本...', status: 'pending', timestamp: '00:02' },
     ];
+    
+    if (signal?.aborted) return [];
     setLiveSteps(newSteps);
 
-    // Simulate progress
-    for (let i = 0; i < newSteps.length; i++) {
-      setLiveSteps(prev => prev.map((s, idx) => idx === i ? { ...s, status: 'processing' } : s));
-      await new Promise(resolve => setTimeout(resolve, 800)); 
-      setLiveSteps(prev => prev.map((s, idx) => idx === i ? { ...s, status: 'completed' } : s));
+    try {
+      // Simulate progress
+      for (let i = 0; i < newSteps.length; i++) {
+        if (signal?.aborted) return [];
+        setLiveSteps(prev => prev.map((s, idx) => idx === i ? { ...s, status: 'processing' } : s));
+        await delay(800, signal);
+        setLiveSteps(prev => prev.map((s, idx) => idx === i ? { ...s, status: 'completed' } : s));
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return [];
+      }
+      throw error;
     }
     
     // Return the completed steps to be saved
@@ -105,7 +160,6 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
     if (!promptText.trim() || isStreaming) return;
 
     let finalPrompt = promptText;
-    // Prepend target agent if selected in collaboration mode
     if (isCollaboration && activeCollabAgentId) {
        const targetAgent = collabAgents.find(a => a.id === activeCollabAgentId);
        if (targetAgent) {
@@ -124,45 +178,76 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
     onUpdateSession(session.id, updatedMessages);
     setInput('');
     setIsStreaming(true);
-    
-    // Start step simulation
-    const completedStepsPromise = simulateSteps();
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+    }
+    streamAbortRef.current = new AbortController();
+
+    const completedStepsPromise = simulateSteps(streamAbortRef.current.signal, finalPrompt);
 
     const aiMsgId = (Date.now() + 1).toString();
     let aiContent = '';
-    
     const sysInstruction = isCollaboration 
        ? "你是迪尚集团的虚拟专家团队协调员。请根据用户需求，调度相关领域的Agent进行回答。" 
        : agent?.systemInstruction || "";
 
-    await streamAgentResponse(
-      userMsg.content,
-      sysInstruction,
-      updatedMessages,
-      (chunk) => {
-        aiContent += chunk;
-        onUpdateSession(session.id, [
-          ...updatedMessages,
-          { id: aiMsgId, role: 'model', content: aiContent, timestamp: Date.now() }
-        ]);
-      }
-    );
+    let scheduled = false;
+    const flush = () => {
+      onUpdateSession(session.id, [
+        ...updatedMessages,
+        { id: aiMsgId, role: 'model', content: aiContent, timestamp: Date.now() }
+      ]);
+    };
+    const scheduleFlush = () => {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        if (streamAbortRef.current?.signal.aborted) {
+          scheduled = false;
+          return;
+        }
+        flush();
+        scheduled = false;
+      }, 80);
+    };
 
-    // Wait for steps to complete and save them to the message
-    const finalSteps = await completedStepsPromise;
-    onUpdateSession(session.id, [
-      ...updatedMessages,
-      { 
-        id: aiMsgId, 
-        role: 'model', 
-        content: aiContent, 
-        timestamp: Date.now(),
-        steps: finalSteps 
-      }
-    ]);
+    try {
+      await streamAgentResponse(
+        userMsg.content,
+        sysInstruction,
+        updatedMessages,
+        (chunk) => {
+          if (streamAbortRef.current?.signal.aborted) return;
+          aiContent += chunk;
+          scheduleFlush();
+        },
+        { signal: streamAbortRef.current?.signal, onDone: flush }
+      );
 
-    setIsStreaming(false);
-    setLiveSteps([]); // Clear live steps as they are now saved in the message
+      const finalSteps = await completedStepsPromise;
+      
+      if (streamAbortRef.current?.signal.aborted) return;
+
+      onUpdateSession(session.id, [
+        ...updatedMessages,
+        { 
+          id: aiMsgId, 
+          role: 'model', 
+          content: aiContent, 
+          timestamp: Date.now(),
+          steps: finalSteps 
+        }
+      ]);
+    } catch (error) {
+      if ((error as any).name !== 'AbortError') {
+        console.error('Generation failed:', error);
+      }
+    } finally {
+      if (!streamAbortRef.current?.signal.aborted) {
+        setIsStreaming(false);
+        setLiveSteps([]);
+      }
+    }
   };
 
   // Simulate a full tutorial conversation when clicking a featured case
@@ -239,6 +324,12 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
     );
   };
 
+  useEffect(() => {
+    return () => {
+      if (streamAbortRef.current) streamAbortRef.current.abort();
+    };
+  }, []);
+
   return (
     <div className="flex flex-1 h-screen overflow-hidden bg-white relative">
       {/* Main Chat Area */}
@@ -247,13 +338,64 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
         {session.messages.length > 0 && (
           <div className="h-14 border-b border-slate-50 flex items-center justify-between px-6 flex-shrink-0 bg-white z-10">
             <div className="flex items-center space-x-2">
-              <span className="font-semibold text-slate-800">{isCollaboration ? '员工协作' : agent?.name}</span>
-              <span className="bg-brand-50 text-brand-600 text-[10px] px-1.5 py-0.5 rounded border border-brand-100">Bot</span>
+              <span className="font-semibold text-slate-800">
+                {isCollaboration ? (session.groupName || session.title || '员工协作') : agent?.name}
+              </span>
+              <span className="bg-blue-50 text-blue-600 text-[10px] px-1.5 py-0.5 rounded border border-blue-100">Bot</span>
             </div>
-            <div className="flex items-center space-x-4 text-slate-400">
-              <Share2 size={18} className="hover:text-slate-600 cursor-pointer" />
-              <Star size={18} className="hover:text-slate-600 cursor-pointer" />
-              <MoreHorizontal size={18} className="hover:text-slate-600 cursor-pointer" />
+            <div className="flex items-center space-x-1 text-slate-400">
+              <button 
+                onClick={() => onFavoriteSession(session.id)} 
+                className={`p-2 hover:bg-slate-100 rounded-lg transition-colors ${session.isFavorite ? 'text-amber-400 hover:text-amber-500' : 'hover:text-slate-600'}`}
+                title={session.isFavorite ? "取消收藏" : "收藏对话"}
+              >
+                <Star size={18} fill={session.isFavorite ? "currentColor" : "none"} />
+              </button>
+
+              <div className="relative">
+                <button 
+                  onClick={() => setIsSharePopoverOpen(!isSharePopoverOpen)} 
+                  className={`p-2 hover:bg-slate-100 rounded-lg transition-colors ${isSharePopoverOpen ? 'bg-slate-100 text-slate-600' : 'hover:text-slate-600'}`} 
+                  title="分享对话"
+                >
+                  <Share2 size={18} />
+                </button>
+                <SharePopover 
+                  isOpen={isSharePopoverOpen} 
+                  onClose={() => setIsSharePopoverOpen(false)} 
+                />
+              </div>
+
+              <button onClick={() => setIsFilesModalOpen(true)} className="p-2 hover:bg-slate-100 rounded-lg hover:text-slate-600 transition-colors" title="查看文件">
+                <FolderOpen size={18} />
+              </button>
+              
+              <button 
+                onClick={() => setDrawerOpen(true)} 
+                className={`p-2 hover:bg-slate-100 rounded-lg transition-colors ${drawerOpen ? 'bg-slate-100 text-slate-600' : 'hover:text-slate-600'}`} 
+                title="查看步骤"
+              >
+                <GitMerge size={18} />
+              </button>
+
+              <button 
+                onClick={() => setIsHistoryDrawerOpen(true)} 
+                className={`p-2 hover:bg-slate-100 rounded-lg transition-colors ${isHistoryDrawerOpen ? 'bg-slate-100 text-slate-600' : 'hover:text-slate-600'}`}
+                title="历史任务"
+              >
+                <Clock size={18} />
+              </button>
+
+              {session.status !== 'completed' && (
+                <button 
+                  onClick={() => onEndSession(session.id)} 
+                  className="flex items-center px-3 py-1.5 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-sm font-medium ml-2"
+                  title="结束任务"
+                >
+                  <Power size={16} className="mr-1.5" />
+                  结束任务
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -262,15 +404,26 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
         <div className="flex-1 overflow-y-auto bg-white scroll-smooth" ref={scrollRef}>
           {session.messages.length === 0 ? (
             // === LANDING PAGE STATE ===
-            <div className="min-h-full flex flex-col items-center pt-16 pb-10 px-8">
+            <div className="min-h-full flex flex-col items-center pt-16 pb-10 px-8 relative">
+               {/* History Tasks Button */}
+               <div className="absolute top-6 right-8">
+                  <button 
+                    onClick={() => setIsHistoryDrawerOpen(true)}
+                    className="flex items-center px-4 py-2 text-slate-500 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:text-slate-700 transition-colors shadow-sm text-sm font-medium"
+                  >
+                    <Clock size={16} className="mr-2" />
+                    历史任务
+                  </button>
+               </div>
+
                {/* 1. Identity */}
-               <div className="w-24 h-24 bg-gradient-to-tr from-brand-400 to-brand-600 rounded-full flex items-center justify-center text-white shadow-xl shadow-brand-100 mb-6 transform hover:scale-105 transition-transform duration-300">
+               <div className="w-24 h-24 bg-gradient-to-tr from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white shadow-xl shadow-blue-100 mb-6 transform hover:scale-105 transition-transform duration-300">
                   {isCollaboration ? <Users size={44} /> : <IconComponent size={44} />}
                </div>
                <h1 className="text-3xl font-bold text-slate-900 mb-3 tracking-tight">
                  {isCollaboration ? '员工协作' : agent?.name}
                </h1>
-               <p className="text-slate-500 mb-10 flex items-center text-base hover:text-brand-600 transition-colors cursor-pointer group">
+               <p className="text-slate-500 mb-10 flex items-center text-base hover:text-blue-600 transition-colors cursor-pointer group">
                   {isCollaboration 
                     ? '由多位专家Agent组成的协作团队，为您处理跨部门复杂业务' 
                     : `由迪尚AI团队孵化的专家 Agent，为您提供专业的${agent?.category}服务`
@@ -280,8 +433,8 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
 
                {/* 2. Hero Input Box */}
                <div className="w-full max-w-5xl relative mb-12">
-                  <div className="absolute -inset-1 bg-gradient-to-r from-purple-100 via-indigo-50 to-blue-50 rounded-3xl blur opacity-60"></div>
-                  <div className="relative bg-white rounded-2xl border border-slate-200 shadow-[0_8px_30px_-6px_rgba(0,0,0,0.05)] p-5 transition-shadow hover:shadow-[0_8px_30px_-6px_rgba(99,102,241,0.15)] flex flex-col">
+                  <div className="absolute -inset-1 bg-gradient-to-r from-blue-100 via-indigo-50 to-purple-50 rounded-3xl blur opacity-60"></div>
+                  <div className="relative bg-white rounded-2xl border border-slate-200 shadow-[0_8px_30px_-6px_rgba(0,0,0,0.05)] p-5 transition-shadow hover:shadow-[0_8px_30px_-6px_rgba(37,99,235,0.15)] flex flex-col">
                     
                     {/* Selected Agents Shortcuts (Landing State) */}
                     {renderCollabShortcuts("mb-3 px-1")}
@@ -308,7 +461,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                           disabled={!input.trim()}
                           className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
                             input.trim() 
-                              ? 'bg-brand-600 text-white shadow-lg shadow-brand-200 translate-y-0' 
+                              ? 'bg-blue-600 text-white shadow-lg shadow-blue-200 translate-y-0' 
                               : 'bg-slate-100 text-slate-300 translate-y-1'
                           }`}
                         >
@@ -328,12 +481,12 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                         <div className="p-2 bg-orange-100 text-orange-600 rounded-lg">
                            <Sparkles size={20} />
                         </div>
-                        <h3 className="font-bold text-slate-800 text-lg group-hover:text-brand-600 transition-colors">快速开始</h3>
+                        <h3 className="font-bold text-slate-800 text-lg group-hover:text-blue-600 transition-colors">快速开始</h3>
                      </div>
                      <p className="text-slate-500 text-sm leading-relaxed mb-4 flex-1">
                         "{agent?.promptPreview || "发起协作任务..."}"
                      </p>
-                     <span className="text-xs font-semibold text-slate-400 group-hover:text-brand-500 flex items-center">
+                     <span className="text-xs font-semibold text-slate-400 group-hover:text-blue-500 flex items-center">
                         立即尝试 <ArrowRight size={12} className="ml-1" />
                      </span>
                   </div>
@@ -344,7 +497,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                         <div className="p-2 bg-purple-100 text-purple-600 rounded-lg">
                            <BookOpen size={20} />
                         </div>
-                        <h3 className="font-bold text-slate-800 text-lg group-hover:text-brand-600 transition-colors">能力说明</h3>
+                        <h3 className="font-bold text-slate-800 text-lg group-hover:text-blue-600 transition-colors">能力说明</h3>
                      </div>
                      <p className="text-slate-500 text-sm leading-relaxed mb-4 flex-1">
                         {isCollaboration 
@@ -352,7 +505,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                           : `基于 ${agent?.category} 知识库构建，支持多模态输入与专业分析。`
                         }
                      </p>
-                     <span className="text-xs font-semibold text-slate-400 group-hover:text-brand-500 flex items-center">
+                     <span className="text-xs font-semibold text-slate-400 group-hover:text-blue-500 flex items-center">
                         查看详情 <ArrowRight size={12} className="ml-1" />
                      </span>
                   </div>
@@ -363,7 +516,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                  <div className="w-full max-w-5xl">
                     <div className="flex items-center justify-between mb-6 px-2">
                        <h3 className="text-lg font-bold text-slate-800">精选案例</h3>
-                       <span className="text-sm text-slate-400 hover:text-brand-600 cursor-pointer">查看更多</span>
+                       <span className="text-sm text-slate-400 hover:text-blue-600 cursor-pointer">查看更多</span>
                     </div>
                     
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
@@ -389,7 +542,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                                   <div className="flex items-center space-x-2 mb-2">
                                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full border border-slate-100">{item.type}</span>
                                   </div>
-                                  <h4 className="font-bold text-slate-800 group-hover:text-brand-600 transition-colors line-clamp-1">{item.title}</h4>
+                                  <h4 className="font-bold text-slate-800 group-hover:text-blue-600 transition-colors line-clamp-1">{item.title}</h4>
                                   <p className="text-xs text-slate-400 mt-2 flex items-center">
                                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 mr-1.5"></span>
                                      已生成 1200+ 次
@@ -408,13 +561,13 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
               {session.messages.map((msg) => (
                 <div key={msg.id} className={`flex space-x-4 ${msg.role === 'user' ? 'justify-end' : ''}`}>
                   {msg.role === 'model' && (
-                    <div className="w-9 h-9 rounded-full bg-brand-600 flex items-center justify-center flex-shrink-0 mt-1 shadow-md text-white border-2 border-white ring-1 ring-slate-100">
+                    <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0 mt-1 shadow-md text-white border-2 border-white ring-1 ring-slate-100">
                       {isCollaboration ? <Users size={18} /> : <IconComponent size={18} />}
                     </div>
                   )}
                   
                   <div className={`flex flex-col max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                    <div className={`${msg.role === 'user' ? 'bg-brand-600 text-white shadow-lg shadow-brand-100' : 'bg-white text-slate-800 shadow-md border border-slate-100'} px-6 py-4 rounded-2xl leading-7 text-[15px]`}>
+                    <div className={`${msg.role === 'user' ? 'bg-blue-600 text-white shadow-lg shadow-blue-100' : 'bg-white text-slate-800 shadow-md border border-slate-100'} px-6 py-4 rounded-2xl leading-7 text-[15px]`}>
                       <div className="whitespace-pre-wrap">{msg.content}</div>
                       
                       {/* View Steps Button for Model Messages */}
@@ -422,7 +575,7 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
                         <div className="mt-3 pt-3 border-t border-slate-100/50">
                            <button 
                              onClick={() => handleOpenDrawer(msg.steps || [])}
-                             className="text-xs font-medium text-brand-600 bg-brand-50 hover:bg-brand-100 px-3 py-1.5 rounded-lg transition-colors flex items-center"
+                             className="text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors flex items-center"
                            >
                               <Sparkles size={12} className="mr-1.5" />
                               查看思考过程
@@ -444,16 +597,16 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
               {/* Live Streaming Indicator & Steps */}
               {isStreaming && (
                 <div className="flex space-x-4">
-                   <div className="w-9 h-9 rounded-full bg-brand-600 flex items-center justify-center flex-shrink-0 mt-1 shadow-md text-white border-2 border-white ring-1 ring-slate-100">
+                   <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0 mt-1 shadow-md text-white border-2 border-white ring-1 ring-slate-100">
                       {isCollaboration ? <Users size={18} /> : <IconComponent size={18} />}
                    </div>
                    <div className="flex flex-col items-start max-w-[85%]">
                       {/* Thinking Status */}
                       <div className="bg-white border border-slate-100 rounded-2xl px-4 py-3 shadow-sm mb-2 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition-colors" onClick={() => handleOpenDrawer(liveSteps)}>
                          <div className="flex items-center space-x-1">
-                            <div className="w-2 h-2 bg-brand-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
-                            <div className="w-2 h-2 bg-brand-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                            <div className="w-2 h-2 bg-brand-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
                          </div>
                          <span className="text-sm text-slate-500 font-medium">
                             {liveSteps.find(s => s.status === 'processing')?.title || '正在思考...'}
@@ -470,42 +623,61 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
         {/* Floating Input Area (Only for Active Chat) */}
         {session.messages.length > 0 && (
           <div className="absolute bottom-6 left-0 right-0 px-4 pointer-events-none z-20">
-            <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-[0_8px_30px_-6px_rgba(0,0,0,0.1)] border border-slate-200 p-2 pointer-events-auto flex flex-col">
-               
-               {/* Selected Agents Shortcuts (Active Chat State) */}
-               {renderCollabShortcuts("px-2 pt-1")}
+            {session.status === 'completed' ? (
+              <div className="max-w-3xl mx-auto pointer-events-auto">
+                 <div className="bg-white rounded-full border border-slate-200 shadow-[0_8px_30px_-6px_rgba(0,0,0,0.05)] p-2 pl-6 flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                       <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white shadow-md shadow-blue-100">
+                          {isCollaboration ? <Users size={16} /> : <IconComponent size={16} />}
+                       </div>
+                       <span className="font-bold text-slate-700">任务已终止</span>
+                    </div>
+                    <button 
+                      onClick={() => agent && onCreateNewSession(agent.id)} 
+                      className="bg-blue-600 text-white px-6 py-2 rounded-full font-bold hover:bg-blue-700 transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 text-sm"
+                    >
+                       创建新任务
+                    </button>
+                 </div>
+              </div>
+            ) : (
+              <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-[0_8px_30px_-6px_rgba(0,0,0,0.1)] border border-slate-200 p-2 pointer-events-auto flex flex-col">
+                 
+                 {/* Selected Agents Shortcuts (Active Chat State) */}
+                 {renderCollabShortcuts("px-2 pt-1")}
 
-               <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSubmit();
+                 <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSubmit();
+                      }
+                    }}
+                    placeholder={
+                      isCollaboration && activeCollabAgentId 
+                        ? `向 @${collabAgents.find(a => a.id === activeCollabAgentId)?.name} 提问...` 
+                        : "发送消息..."
                     }
-                  }}
-                  placeholder={
-                    isCollaboration && activeCollabAgentId 
-                      ? `向 @${collabAgents.find(a => a.id === activeCollabAgentId)?.name} 提问...` 
-                      : "发送消息..."
-                  }
-                  className="w-full px-4 py-3 bg-transparent outline-none text-slate-700 placeholder-slate-400 resize-none max-h-[120px]"
-                  rows={1}
-                />
-                <div className="flex justify-between items-center px-2 pb-1">
-                   <div className="flex space-x-1 text-slate-400">
-                      <button className="p-2 hover:bg-slate-50 rounded-lg transition-colors hover:text-brand-600"><Paperclip size={18}/></button>
-                      <button className="p-2 hover:bg-slate-50 rounded-lg transition-colors hover:text-brand-600"><ImageIcon size={18}/></button>
-                   </div>
-                   <button 
-                    onClick={() => handleSubmit()}
-                    disabled={!input.trim() || isStreaming}
-                    className={`p-2 rounded-lg transition-all ${input.trim() ? 'bg-brand-600 text-white shadow-md' : 'bg-slate-100 text-slate-300'}`}
-                  >
-                    <Send size={18} />
-                  </button>
-                </div>
-            </div>
+                    className="w-full px-4 py-3 bg-transparent outline-none text-slate-700 placeholder-slate-400 resize-none max-h-[120px]"
+                    rows={1}
+                  />
+                  <div className="flex justify-between items-center px-2 pb-1">
+                     <div className="flex space-x-1 text-slate-400">
+                        <button className="p-2 hover:bg-slate-50 rounded-lg transition-colors hover:text-blue-600"><Paperclip size={18}/></button>
+                        <button className="p-2 hover:bg-slate-50 rounded-lg transition-colors hover:text-blue-600"><ImageIcon size={18}/></button>
+                     </div>
+                     <button 
+                      onClick={() => handleSubmit()}
+                      disabled={!input.trim() || isStreaming}
+                      className={`p-2 rounded-lg transition-all ${input.trim() ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-100 text-slate-300'}`}
+                    >
+                      <Send size={18} />
+                    </button>
+                  </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -518,53 +690,134 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
         ></div>
       )}
 
-      {/* Sliding Drawer */}
-      <div className={`absolute top-0 right-0 h-full w-[350px] bg-white shadow-2xl z-40 transform transition-transform duration-300 ease-in-out border-l border-slate-100 ${drawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+
+
+      {/* History Drawer */}
+      <div className={`absolute top-0 right-0 h-full w-[450px] bg-white shadow-2xl z-40 transform transition-transform duration-300 ease-in-out border-l border-slate-100 ${isHistoryDrawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
          <div className="flex flex-col h-full">
-            <div className="h-14 border-b border-slate-50 flex items-center justify-center px-5 relative">
-               <h3 className="font-bold text-slate-800 flex items-center">
-                  <Sparkles size={16} className="text-brand-500 mr-2"/>
-                  思维链
+            <div className="h-14 border-b border-slate-50 flex items-center justify-between px-6 relative bg-white z-10">
+               <h3 className="font-bold text-slate-800 text-lg">
+                  历史任务
+               </h3>
+               <button 
+                 onClick={() => setIsHistoryDrawerOpen(false)}
+                 className="p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+               >
+                  <X size={20} />
+               </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-50/50">
+               {sessions.filter(s => s.agentId === agent?.id && s.id !== sessionId).length === 0 ? (
+                 <div className="flex flex-col items-center justify-center mt-20 text-slate-400 space-y-4 opacity-60">
+                    <History size={32} className="text-slate-300"/>
+                    <p className="text-xs">暂无其他历史任务</p>
+                    <button 
+                      onClick={() => {
+                        if (agent) {
+                          onCreateNewSession(agent.id);
+                          setIsHistoryDrawerOpen(false);
+                        }
+                      }}
+                      className="mt-4 px-4 py-2 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
+                    >
+                      创建新任务
+                    </button>
+                 </div>
+               ) : (
+                 <div className="space-y-3">
+                   {sessions.filter(s => s.agentId === agent?.id && s.id !== sessionId)
+                   .sort((a, b) => b.updatedAt - a.updatedAt)
+                   .map(s => (
+                     <div 
+                       key={s.id}
+                       onClick={() => {
+                         navigate(`/chat/${s.id}`);
+                         setIsHistoryDrawerOpen(false);
+                       }}
+                       className="bg-white p-4 rounded-xl border border-slate-100 hover:shadow-md cursor-pointer transition-all group"
+                     >
+                       <div className="flex items-center justify-between mb-2">
+                         <h4 className="font-bold text-slate-700 truncate group-hover:text-blue-600 flex-1">{s.title || "未命名对话"}</h4>
+                         <div className="flex items-center space-x-2 ml-2">
+                           <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${
+                             s.status === 'completed' 
+                               ? 'text-emerald-600 bg-emerald-50 border-emerald-100' 
+                               : 'text-orange-600 bg-orange-50 border-orange-100'
+                           }`}>
+                             {s.status === 'completed' ? '已完成' : '进行中'}
+                           </span>
+                           <ChevronRight size={16} className="text-slate-300 group-hover:text-blue-500 transition-colors" />
+                         </div>
+                       </div>
+                       <div className="flex items-center text-xs text-slate-400 space-x-2">
+                         <Clock size={12} />
+                         <span>{new Date(s.updatedAt).toLocaleString()}</span>
+                       </div>
+                     </div>
+                   ))}
+                 </div>
+               )}
+            </div>
+         </div>
+      </div>
+
+      {/* Steps Drawer */}
+      <div className={`absolute top-0 right-0 h-full w-[450px] bg-white shadow-2xl z-40 transform transition-transform duration-300 ease-in-out border-l border-slate-100 ${drawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+         <div className="flex flex-col h-full">
+            <div className="h-14 border-b border-slate-50 flex items-center justify-between px-6 relative bg-white z-10">
+               <h3 className="font-bold text-slate-800 text-lg">
+                  步骤
                </h3>
                <button 
                  onClick={() => setDrawerOpen(false)}
-                 className="absolute right-4 p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+                 className="p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
                >
                   <X size={20} />
                </button>
             </div>
             
             <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
-               <div className="relative pl-2 space-y-8 before:absolute before:left-[9px] before:top-2 before:bottom-2 before:w-[1px] before:bg-slate-200/60">
+               <div className="relative pl-4 space-y-8 before:absolute before:left-[19px] before:top-2 before:bottom-2 before:w-[2px] before:bg-blue-100/50 before:border-l before:border-dashed before:border-blue-200">
                  {(isStreaming && liveSteps.length > 0 ? liveSteps : drawerSteps).length === 0 ? (
                     <div className="flex flex-col items-center justify-center mt-20 text-slate-400 space-y-4 opacity-60">
-                       <Box size={24} className="text-slate-300"/>
-                       <p className="text-xs">暂无思考步骤</p>
+                       <GitMerge size={32} className="text-slate-300"/>
+                       <p className="text-xs">暂无步骤记录</p>
                     </div>
                  ) : (
                    (isStreaming && liveSteps.length > 0 ? liveSteps : drawerSteps).map((step) => (
-                     <div key={step.id} className="relative pl-8 group">
+                     <div key={step.id} className="relative pl-10 group">
                        {/* Timeline Node */}
-                       <div className={`absolute left-0 top-1 w-[20px] h-[20px] rounded-full border-[3px] flex items-center justify-center z-10 transition-all duration-300 ${
-                         step.status === 'completed' ? 'border-brand-500 bg-white' : 
-                         step.status === 'processing' ? 'border-brand-300 bg-brand-50' : 'border-slate-200 bg-slate-50'
+                       <div className={`absolute left-0 top-0 w-10 h-10 -ml-1 rounded-full border-[3px] flex items-center justify-center z-10 transition-all duration-300 bg-white shadow-sm ${
+                         step.status === 'completed' ? 'border-blue-500 text-blue-600' : 
+                         step.status === 'processing' ? 'border-blue-400 text-blue-500' : 'border-slate-200 text-slate-300'
                        }`}>
-                         {step.status === 'completed' && <div className="w-2.5 h-2.5 bg-brand-500 rounded-full" />}
-                         {step.status === 'processing' && <div className="w-2.5 h-2.5 bg-brand-400 rounded-full animate-pulse" />}
+                          {step.title.includes('用户') ? <User size={16} /> : 
+                           step.title.includes('文件') ? <FolderOpen size={16} /> : 
+                           step.title.includes('终端') ? <Box size={16} /> : <Sparkles size={16} />}
                        </div>
                        
-                       <div className="transition-all duration-500">
-                         <div className="flex items-center justify-between mb-1.5">
-                            <h4 className={`text-sm font-bold ${step.status === 'pending' ? 'text-slate-400' : 'text-slate-800'}`}>{step.title}</h4>
-                            {step.status === 'completed' && <span className="text-[10px] text-brand-600 font-mono bg-brand-50 px-1.5 py-0.5 rounded ml-2">DONE</span>}
+                       <div className="transition-all duration-500 pt-1">
+                         <div className="flex items-center justify-between mb-2">
+                            <h4 className={`font-bold ${step.status === 'pending' ? 'text-slate-400' : 'text-slate-800'}`}>{step.title}</h4>
                          </div>
                          
-                         <div className={`text-xs leading-relaxed p-3 rounded-xl border transition-colors ${
+                         <div className={`text-sm leading-relaxed p-4 rounded-2xl border transition-colors ${
                            step.status === 'processing' 
-                             ? 'bg-brand-50/50 border-brand-100 text-slate-700' 
+                             ? 'bg-blue-50/50 border-blue-100 text-slate-700' 
                              : 'bg-white border-slate-100 text-slate-500 shadow-sm'
                          }`}>
                            {step.description}
+                           {step.title.includes('文件') && (
+                             <div className="mt-3 flex items-center p-2 bg-slate-50 rounded-lg border border-slate-100">
+                               <div className="w-8 h-8 bg-white rounded flex items-center justify-center text-blue-500 border border-slate-100 mr-2">
+                                 <FileText size={16} />
+                               </div>
+                               <div className="flex-1 min-w-0">
+                                 <div className="text-xs font-medium truncate text-slate-700">安全生产平台功能结构图.png</div>
+                               </div>
+                             </div>
+                           )}
                          </div>
                        </div>
                      </div>
@@ -574,6 +827,12 @@ const Chat: React.FC<ChatProps> = ({ sessions, onUpdateSession }) => {
             </div>
          </div>
       </div>
+
+      <FileViewerModal 
+        isOpen={isFilesModalOpen} 
+        onClose={() => setIsFilesModalOpen(false)} 
+        files={MOCK_FILES}
+      />
     </div>
   );
 };

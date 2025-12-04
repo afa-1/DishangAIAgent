@@ -32,6 +32,15 @@ export const DISHANG_AGENTS: Agent[] = [
     promptPreview: '基于复古工装风，生成3套男士夹克设计方案。',
     systemInstruction: '你是迪尚集团的款式创新专家。基于用户输入的关键词或风格，结合迪尚核心品类数据，构思并描述服装设计方案。你需要详细描述款式细节、推荐面料和尺寸参数。'
   },
+  {
+    id: 'design-gown',
+    name: '学位服设计 Agent',
+    category: AgentCategory.DESIGN,
+    description: '专注于学位服的款式设计、面料搭配与版型优化，结合高校文化定制方案。',
+    icon: 'Shirt',
+    promptPreview: '设计一套融合传统文化元素的博士学位服改良方案。',
+    systemInstruction: '你是学位服设计专家。请结合特定学校的文化底蕴、学科特色以及人体工程学，设计既庄重典雅又舒适实用的学位服。'
+  },
   
   // 生产与供应链
   {
@@ -84,6 +93,15 @@ export const DISHANG_AGENTS: Agent[] = [
     icon: 'FileText',
     promptPreview: '审查这份面料采购合同，检查付款周期是否合规。',
     systemInstruction: '你是法务合规专家。对照迪尚合同标准模板，严格审查合同条款。重点关注付款方式、违约责任和交货期，指出风险等级（高/中/低）并给出修改建议。'
+  },
+  {
+    id: 'mgmt-analysis',
+    name: '智能体用度分析 Agent',
+    category: AgentCategory.MANAGEMENT,
+    description: '分析各智能体的使用频率、Token消耗及任务完成效率，优化资源配置。',
+    icon: 'Briefcase',
+    promptPreview: '生成本月智能体Token消耗排行及成本分析报表。',
+    systemInstruction: '你是智能体平台管理员。负责监控和分析平台内各Agent的运行数据，计算Token消耗成本，评估任务完成效率，并提供资源优化建议。'
   }
 ];
 
@@ -101,5 +119,80 @@ export const MOCK_HISTORY: ChatSession[] = [
     agentId: 'sales-copy',
     messages: [],
     updatedAt: Date.now() - 500000
+  },
+  {
+    id: 'h3',
+    title: '夏季运动面料分析报告',
+    agentId: 'design-trend',
+    messages: [],
+    updatedAt: Date.now() - 86400000
+  },
+  {
+    id: 'h4',
+    title: '2025春季色彩趋势预测',
+    agentId: 'design-trend',
+    messages: [],
+    updatedAt: Date.now() - 172800000
+  },
+  {
+    id: 'h5',
+    title: '库存积压处理建议',
+    agentId: 'prod-inventory',
+    messages: [],
+    updatedAt: Date.now() - 345600000
+  },
+  {
+    id: 'h6',
+    title: 'VIP客户定制订单排期',
+    agentId: 'prod-schedule',
+    messages: [],
+    updatedAt: Date.now() - 604800000
+  }
+];
+
+export const MOCK_GROUPS: import('./types').CollaborationGroup[] = [
+  {
+    id: 'g1',
+    name: '秋季西装开发群',
+    department: '设计+生产',
+    task: '完成设计→排产',
+    deadline: '8.30截止',
+    status: 'active',
+    unreadCount: 3,
+    memberAgentIds: ['design-trend', 'prod-inventory', 'prod-schedule'],
+    updatedAt: Date.now()
+  },
+  {
+    id: 'g2',
+    name: '国企团装交付群',
+    department: '销售+客服',
+    task: '定制100套西装',
+    deadline: '9.05截止',
+    status: 'active',
+    unreadCount: 0,
+    memberAgentIds: ['sales-copy', 'service-smart'],
+    updatedAt: Date.now() - 100000
+  },
+  {
+    id: 'g3',
+    name: '2025春夏面料预研',
+    department: '设计+采购',
+    task: '新型面料筛选',
+    deadline: '待定',
+    status: 'pending',
+    unreadCount: 0,
+    memberAgentIds: ['design-style', 'prod-inventory'],
+    updatedAt: Date.now() - 86400000
+  },
+  {
+    id: 'g4',
+    name: 'Q2季度销售复盘',
+    department: '全员',
+    task: '数据汇总与分析',
+    deadline: '已完成',
+    status: 'completed',
+    unreadCount: 0,
+    memberAgentIds: ['sales-copy', 'mgmt-contract'],
+    updatedAt: Date.now() - 864000000
   }
 ];

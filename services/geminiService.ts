@@ -11,7 +11,8 @@ export const streamAgentResponse = async (
   prompt: string,
   systemInstruction: string,
   history: { role: 'user' | 'model'; content: string }[],
-  onChunk: (text: string) => void
+  onChunk: (text: string) => void,
+  options?: { signal?: AbortSignal; onDone?: () => void }
 ) => {
   try {
     const chat = ai.chats.create({
@@ -27,12 +28,18 @@ export const streamAgentResponse = async (
     });
 
     const result = await chat.sendMessageStream({ message: prompt });
-
+    let aborted = false;
+    if (options?.signal) {
+      if (options.signal.aborted) aborted = true;
+      options.signal.addEventListener('abort', () => { aborted = true; });
+    }
     for await (const chunk of result) {
+      if (aborted) break;
       if (chunk.text) {
         onChunk(chunk.text);
       }
     }
+    if (options?.onDone) options.onDone();
   } catch (error) {
     console.error("Gemini API Error:", error);
     onChunk("\n[系统提示]: AI 服务暂时不可用，请检查 API Key 或稍后重试。");
