@@ -19,6 +19,12 @@ const AppContent: React.FC = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.hostname.endsWith('github.io')) {
+      setIsAuthenticated(true);
+    }
+  }, []);
+
+  useEffect(() => {
     if (isAuthenticated) {
       const hasCompletedOnboarding = localStorage.getItem('onboarding_completed');
       if (!hasCompletedOnboarding) {
